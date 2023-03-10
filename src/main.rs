@@ -1,10 +1,11 @@
 mod vectors;
 mod sph;
-mod pbrt;
+mod luxrender;
 mod eigen_value;
 //https://elrnv.com/cs888/cs888proj.pdf
-use std::time::Instant;
-
+use std::{time::Instant, env, sync::{Arc, atomic::{AtomicUsize, Ordering}, RwLock}};
+use rayon::prelude::{IntoParallelIterator, ParallelIterator};
+use std::io::Write;
 use prgrs::Prgrs;
 use vectors::Vector;
 
@@ -18,8 +19,8 @@ pub struct DensityPosition {
 }
 
 // static TOTAL: usize = 500;
-static TIME: usize = 50;
-static DT: f64 = 0.004;//1.0/144.0;
+static TIME: usize = 500;
+static DT: f64 = 1.0/144.0;//1.0/144.0;
 
 impl DensityPosition {
     pub fn new(vector: Vector, density: f64, timestamp: f64) -> Self{
@@ -33,12 +34,12 @@ impl DensityPosition {
 
 use three_d::*;
 
-use crate::sph::SPH;
+use crate::{sph::SPH, luxrender::Renderer};
 
 pub fn main() {
-    let bounds = Vector::new(30.0, 30.0, 30.0);
+    let bounds = Vector::new(50.0, 50.0, 50.0);
     let from = Vector::new(0.0,0.0,0.0);
-    let to = Vector::new(10.0, 10.0, 10.0);
+    let to = Vector::new(25.0, 25.0, 25.0);
 
     let mut sph = SPH::new(bounds, DT);
     sph.add_particle(&from, &to);
@@ -67,19 +68,58 @@ pub fn main() {
         
         t+=DT;
     }
-    
-    //Get time took 
-    let duration = start.elapsed();
-    println!("Time took: {:?}", duration);
 
-    let mut prbt = pbrt::Renderer::new(sph.positions.len(), 0, end, sph.h, sph.mass);
+    let args: Vec<String> = env::args().collect();
+    let end = Arc::new(end);
 
-    for i in Prgrs::new(0..TIME, TIME){
-        prbt.set_frame(i);
-        prbt.generate();
+    if args.len() > 1 && args[1] == "true" {
+        let duration = start.elapsed();
+        println!("Time took to simulate: {:?}", duration);
+        
+        let max_thread = rayon::current_num_threads();
+        println!("{}", max_thread);
+
+        let mut pool = Vec::new();
+        for _ in  0..max_thread {
+            let prbt = Renderer::new(sph.positions.len(), 0, Arc::clone(&end), sph.h, sph.mass);
+            pool.push(Arc::new(RwLock::new(prbt)));
+        }
+
+        let start = Instant::now(); 
+
+        let actual = AtomicUsize::new(0);
+        (199..TIME).into_par_iter().for_each(| i |{
+            let mut prbt = Option::None;
+
+            let mut z = 0;
+            while let None = prbt {
+                if let Ok(pr) = pool[z].try_write() {
+                    prbt = Some(pr);
+                    break;
+                }
+                z += 1;
+
+                if z > max_thread {
+                    z = 0;
+                }
+            
+            }
+            
+
+            let mut prbt = prbt.unwrap();
+            prbt.set_frame(i);
+            prbt.generate();
+            actual.fetch_add(1, Ordering::SeqCst);
+            print!("{:?}/{}\r", actual, 500);
+            std::io::stdout().flush().unwrap();
+        });
+
+        
+        let duration = start.elapsed();
+        println!("Time took to render: {:?}", duration);
+
     }
 
-/*
     let window = Window::new(WindowSettings {
         title: "Shapes!".to_string(),
         max_size: Some((1280, 720)),
@@ -227,5 +267,5 @@ pub fn main() {
         }
         
         FrameOutput::default()
-    });  */
+    }); 
 } 
